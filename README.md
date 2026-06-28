@@ -32,16 +32,7 @@ The code includes:
 ```
 
 ## Environment
-Recommended environment:
-- Python  3.10
-- PyTorch
-- torchvision
-- transformers
-- numpy
-- pandas
-- scikit-learn
-- opencv-python
-- tqdm
+The experimental environment used in the manuscript is Python 3.10.19, PyTorch 2.9.1+cu128, Transformers 4.57.3, and CUDA 12.8.
 
 Install dependencies with:
 
