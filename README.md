@@ -1,11 +1,3 @@
-# MGGFN for Multimodal Aspect-Based Sentiment Analysis
-
-This repository contains the source code corresponding to the manuscript currently submitted to *PLOS One*.
-
-## Notice
-This code repository directly corresponds to the manuscript submitted to *PLOS One*.  
-If you use this code in your research, please cite the corresponding manuscript.
-
 ## Overview
 This repository provides the implementation of a multimodal aspect-based sentiment analysis (MABSA) model.
 
