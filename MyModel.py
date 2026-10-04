@@ -9,7 +9,7 @@ from Channel_Spatial_Fusion import CBAMBlock
 
 
 class MultiHeadAttention(nn.Module):
-    #实现跨模态的注意力交互
+    #实现跨模态的注意力交互（如文本与图像的融合）
     def __init__(self, n_head, d_model, d_k, d_v, dropout=0.1, dropout2=False, attn_type='softmax'):
         super().__init__()
 
@@ -57,17 +57,18 @@ class MultiHeadAttention(nn.Module):
         k = self.w_ks(k).view(sz_b, len_k, n_head, d_k)
         v = self.w_vs(v).view(sz_b, len_v, n_head, d_v)
 
-        q = q.permute(2, 0, 1, 3).contiguous().view(-1, len_q, d_k)
-        k = k.permute(2, 0, 1, 3).contiguous().view(-1, len_k, d_k)
-        v = v.permute(2, 0, 1, 3).contiguous().view(-1, len_v, d_v)
+        q = q.permute(2, 0, 1, 3).contiguous().view(-1, len_q, d_k)  # (n*b) x lq x dk
+        k = k.permute(2, 0, 1, 3).contiguous().view(-1, len_k, d_k)  # (n*b) x lk x dk
+        v = v.permute(2, 0, 1, 3).contiguous().view(-1, len_v, d_v)  # (n*b) x lv x dv
 
         if attn_mask is not None:
-            attn_mask = attn_mask.repeat(n_head, 1, 1)
+            attn_mask = attn_mask.repeat(n_head, 1, 1)  # (n*b) x .. x ..
 
         output, attn = self.attention(q, k, v, attn_mask=attn_mask)
 
         output = output.view(n_head, sz_b, len_q, d_v)
-        output = output.permute(1, 2, 0, 3).contiguous().view(sz_b, len_q, -1)
+        output = output.permute(1, 2, 0, 3).contiguous().view(sz_b, len_q, -1)  # b x lq x (n*dv)
+
         if hasattr(self, 'fc'):
             output = self.fc(output)
 
@@ -135,7 +136,7 @@ class SimpleBertModel(nn.Module):
         self.bert = BertModel.from_pretrained("bert-base-uncased")              #用于编码输入文本
         #self.caption_text_bert = BertModel.from_pretrained("bert-base-uncased") #用于编码全局文本（如字幕）
         #self.face_text_bert = BertModel.from_pretrained("bert-base-uncased")    #用于编码人脸文本
-        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")     #tokenizer属性
+        self.tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")     #新增tokenizer属性
 
         #vit增强步骤维度转换层
         self.vit_proj = nn.Sequential(
@@ -150,7 +151,7 @@ class SimpleBertModel(nn.Module):
         )
 
         self.max_len = opt.MAX_LEN  #定义文本序列的最大长度
-        self.layers = 4             #定义GCN（图卷积网络）的层数
+        self.layers = getattr(opt, "GCN_LAYERS", 1)  #GCN层数，阶段C默认为单层
 
         # Layer Normalization 层，用于标准化特征（维度为 BERT 的隐藏层大小，768）
         self.layernorm = nn.LayerNorm(self.bert.config.hidden_size)
@@ -158,8 +159,9 @@ class SimpleBertModel(nn.Module):
         # 初始化 Channel_Spatial_Fusion 模块
         self.channel_spatial_fusion = CBAMBlock(channel=256, reduction=16, kernel_size=7, HW=14 * 14)
 
-        #图像文本多头注意力，定义跨模态多头注意力模块 【3个注意力头，输入维度：768（BERT 隐藏层大小），输出维度：768】
-        self.mulitHead_text_img = MultiHeadAttention(3, self.bert.config.hidden_size, self.bert.config.hidden_size,
+        #图像文本多头注意力；头数由实验参数控制，默认保持原设置 3
+        self.attention_heads = getattr(opt, "ATTENTION_HEADS", 3)
+        self.mulitHead_text_img = MultiHeadAttention(self.attention_heads, self.bert.config.hidden_size, self.bert.config.hidden_size,
                                             self.bert.config.hidden_size)
 
 
@@ -180,8 +182,8 @@ class SimpleBertModel(nn.Module):
         self.gcn_drop = nn.Dropout(0.1)   #作用于 GCN 输出
 
         #全连接层
-        self.linear_global = nn.Linear(768 * 2,768)  #融合全局特征（图像和文本）
-        self.linear_local = nn.Linear(768 * 2, 768)  #融合局部特征（方面词和跨模态特征）
+        self.linear_global = nn.Linear(768 * 2,768)  #融合全局特征（如图像和文本）
+        self.linear_local = nn.Linear(768 * 2, 768)  #融合局部特征（如方面词和跨模态特征）
 
         self.gated_fusion = gatedFusion(dim=768)  # 替代拼接的融合方式
 
@@ -217,9 +219,9 @@ class SimpleBertModel(nn.Module):
         vit_feature_proj = self.vit_proj(vit_feature[:, 1:, :]) # 去除CLS token [B,196,256]
         vit_spatial = vit_feature_proj.view(-1, 256, 14, 14)  # [B,256,14,14]
    
-        # 对Channel-Spatial Fusion的消融
+        # 对Channel-Spatial Fusion的消融试验
         enhanced_feat1, enhanced_feat2 = self.channel_spatial_fusion(vit_spatial)  #图像特征增强，返回两个值
-        vit_feature_enhance = enhanced_feat1 + enhanced_feat2   
+        vit_feature_enhance = enhanced_feat1 + enhanced_feat2   #废话少说，直接拼接，暴力产生美
         vit_adapted = self.img_adaptor(vit_feature_enhance).permute(0, 2, 1)  # [B,197,768] 维度转换，对齐text_feat
 
         ########################################################################################################################
@@ -284,23 +286,21 @@ class SimpleBertModel(nn.Module):
         denom_dep = context_asp_adj_matrix.sum(2).unsqueeze(2) + 1                      #邻接矩阵的归一化因子
         denom_dep_text_img = context_asp_adj_matrix_text_img.sum(2).unsqueeze(2) + 1
 
-        #GCN 图卷积操作；每层 GCN 对邻接矩阵和特征进行消息传递;
+        #GCN 图卷积操作；每层都以上一层输出作为下一层输入
+        outputs_dep = tmps
+        outputs_dep_text_img = tmps_text_img
         for l in range(self.layers):
             # ************GCN_text*************
-            Ax_dep = context_asp_adj_matrix.bmm(tmps)  #Ax_dep：邻接矩阵与特征的乘积
+            Ax_dep = context_asp_adj_matrix.bmm(outputs_dep)  #Ax_dep：邻接矩阵与上一层特征的乘积
             AxW_dep = self.W1[l](Ax_dep)               #W1[l]：可学习权重矩阵
             AxW_dep = AxW_dep / denom_dep
-            gAxW_dep = F.relu(AxW_dep)                 #归一化后通过 ReLU 激活
+            outputs_dep = F.relu(AxW_dep)              #归一化后通过 ReLU 激活
 
             # ************GCN_text_img*************
-            Ax_dep_text_img = context_asp_adj_matrix_text_img.bmm(tmps_text_img)
+            Ax_dep_text_img = context_asp_adj_matrix_text_img.bmm(outputs_dep_text_img)
             AxW_dep_text_img = self.W2[l](Ax_dep_text_img)
             AxW_dep_text_img = AxW_dep_text_img / denom_dep_text_img
-            gAxW_dep_text_img = F.relu(AxW_dep_text_img)
-
-        #保留最后一层 GCN 的输出
-        outputs_dep = gAxW_dep
-        outputs_dep_text_img = gAxW_dep_text_img
+            outputs_dep_text_img = F.relu(AxW_dep_text_img)
 
         #聚合方面词特征
         asp_wn = target_mask.sum(dim=1).unsqueeze(-1)              #标记方面词的位置
